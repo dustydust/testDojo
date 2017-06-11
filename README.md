@@ -367,3 +367,60 @@ Whatever might change based on user input or any later computation we will put i
     }
   });
   ```
+
+
+# Using a Vagrant VM to run API locally
+
+If you're running Ubuntu as your host OS, there are more specific instructions [here](https://github.com/classdojo/tech-wiki/wiki/API-Installation---Ubuntu---Vagrant)
+
+## Install VirtualBox
+https://www.virtualbox.org/wiki/Downloads
+
+Make sure to grab a version >= 5.1.14
+
+Note: To get frontend tests working on Ubuntu, I had to add a port-forwarding entry for the relevant ports in Oracle VM VirtualBox Manager -> api box -> network -> port-forwarding.
+
+## Install Vagrant
+
+Versions >= 1.9.1 should work. https://releases.hashicorp.com/vagrant/
+
+If you see issues with vagrant starting up, try this:
+```
+vagrant reload
+```
+
+## Install ansible
+
+Version >= 2.1 should work.
+
+http://docs.ansible.com/ansible/intro_installation.html
+
+## Setup VM
+
+`make up-dev`
+
+This will take a while. Vagrant will download the base VM and then run some provisioning on top to make sure the development environment is set up.
+
+**NOTE:** If you run into the following error on Mac OSX
+
+`Unexpected Exception: (setuptools 1.1.6 (/System/Library/Frameworks/Python.framework/Versions/2.7/Extras/lib/python), Requirement.parse('setuptools>=11.3'))`
+
+Then run the following command:
+
+`pip install --upgrade setuptools --user python`
+
+**NOTE:** In the future, whenever someone makes changes to the provisioning scripts, simply pull the latest API code and do `make provision-dev`.
+
+## SSH into the VM and start up the API
+
+```
+vagrant ssh
+cd /vagrant
+rm -rf node_modules # only when using an existing API repo
+yarn install
+NODE_ENV=dev make fixtures
+NODE_ENV=testing make fixtures
+make run
+```
+
+The `/vagrant` directory is synced with the `api` directory on your host machine.
