@@ -424,3 +424,190 @@ make run
 ```
 
 The `/vagrant` directory is synced with the `api` directory on your host machine.
+
+#######################
+
+# Technologies
+
+* `react@15`
+* `react-router@2`
+* `react-router-redux`
+* `redux`
+* `redux-saga`
+* `reselect`
+* `webpack`
+* `recompose`
+
+# Architecture
+
+## Pods
+
+**Pods** are an attempt to encapsulate view and data logic along a specific domain, e.g. authentication, StoryPost, Messaging. Inspiration taken from: [http://jaysoo.ca/2016/02/28/organizing-redux-application/](http://jaysoo.ca/2016/02/28/organizing-redux-application/)
+
+A single Pod can contain
+
+- sagas – used by `redux-saga` middleware to handle async actions or flows of business logic
+- reducer
+- selectors – memoized views of Pod state meant to be used by the pod's containers and by dependent Pods
+- action creators / action types
+- containers – smart components that connect to state of this pod (or pods it depends on) via selectors and fire actions via action creators.
+- components – dumb components that simply render based on `props`
+- higher-order components – components that wrap other components. a common one is a HoC that ensures data is fetched before rendering a child component.
+-  `installer` function – installs this Pod's reducer + sagas and calls the installer of any Pods it depends on
+
+A Pod's directory structure looks like
+
+```
+- auth/
+|- assets/ # images
+|- index.js # all data-related logic (sagas, reducer, selectors, actions)
+|- components/ # containers and components
+ |- AuthContainer.js # containers are suffixed with 'Container'
+ |- Auth.js # components don't have a suffix
+```
+
+All data-related stuff is `import`ed via the index file. Components and Containers can be imported directly from their subpaths.
+
+### Pod dependencies
+
+Pods can depend on other Pods, e.g. StoryPostPod depends on StoryPostCommentsPod. Taken to its logical conclusion, Pods can be published on `npm` and shared across multiple codebases (this isn't an immediate goal, but it'd be nice to keep in mind as we settle on its interface).
+
+There are a few ways Pods can depend on other Pods.
+
+[diagram](https://www.gliffy.com/go/publish/11252247) | [edit](https://www.gliffy.com/go/html5/11252247)
+
+1. A selector can depend on selectors from other pods to derive state, e.g. StoryPostPod's `selectPostWithComments()` would use StoryPostCommentPod's `selectPostComments()`
+2. A container can fire actions from other pods, e.g. a StoryPostPod container may fire StoryPostCommentPod's `fetchCommentsForPost()` action
+3. A container can use containers or components from other pods, e.g. StoryPostPod's `StoryPost` component might use UserPod's `UserAvatar` component.
+4. (not really inter-pod dependency) Containers in a Pod use the Pod's actions (for mutations) and selectors (for accessing state).
+
+### Concrete Examples
+
+`CreatePostFlow` depends on `S3Upload`. To create photo posts, we need to upload an image. S3Upload handles querying API where to upload the file to and uploading the file to S3. CreatePostFlow uses S3Upload's `uploadFile` action creator to start the process, and uses S3Upload's `selectUploadLocation` selector to get the final URL after the image is uploaded.
+
+`I18n` depends on `Auth`. Auth fetches the user once they log in, and the user payload includes their locale. I18n listens on Auth's `LOCALE_CHANGED` action to know when to fetch new translations and rerender the page.
+
+## Sagas
+
+### Why sagas?
+
+Sagas are where asynchronous logic live. Previously, asynchronous logic lived in view components (e.g. event handlers), flux action creators, redux middleware.
+
+#### Component
+
+```
+  componentWillReceiveProps (nextProps) {
+      if (nextProps.parent && invitation && invitation.state === "pending") {
+        dispatch(redeemParentCode(invitation.code)).then(() => {
+          //Reset old requests.
+          dispatch(resetRedeemParentCode());
+          return this.props.history.pushState(null, `/reports/${invitation.student}`);
+        });
+        return;
+      }
+  }
+```
+
+Putting logic in views is fragile because you want this behavior to happen anytime the action is fired, not just when this view fires the action. Also, the view could be removed at a later time, causing bugs if someone else fires the same action.
+
+#### Flux action creators
+
+```
+  updateProgressAndFinish (classroom, stepFinished) {
+    return AddClassActionCreator.updateProgress(classroom, stepFinished)
+      .finally(function() {
+        getAppRouter().transitionTo("points", {classroomId: classroom._id});
+      });
+  }
+```
+
+We can't do this anymore in `redux` because action creators are simply functions that return an action payload.
+
+#### Redux middleware
+
+```
+export default const callAPIMiddleware = ({ dispatch, getState }) => (next) => (action) => {
+  const {callAPI} = action;
+  callAPI.then((res) => dispatch(doneAction(res)))
+};
+```
+
+Middleware are often general code that live far away from a specific domain. Putting domain-specific handling code in middleware makes it hard for developers to figure out what's going on. While that issue could be designed around, sagas also provide functionality like joining on two asynchronous tasks that would be difficult in a basic middleware.
+
+### Examples
+
+```js
+function* ensureLocaleSaga () {
+  yield* takeLatest(LOCALE_CHANGED, loadLocaleSaga);
+}
+
+function* loadLocaleSaga (action) {
+  const locale = action.payload.locale;
+  yield put({type: LOAD});
+  yield call(initClient, locale);
+  yield put({type: LOAD_DONE, payload: {locale}});
+}
+```
+
+```js
+function* requestPermissionSaga () {
+  yield* takeLatest(REQUEST_PERMISSION, askUserForPermissionsSaga);
+}
+
+export function* askUserForPermissionsSaga () {
+  // fork requesting permissions because we don't want the race below cancel
+  // the permissions saga if the delay wins.
+  const requestPermissionsTask = yield fork(requestPermissionFromBrowserSaga);
+
+  // if the user has already given us permissions to their webcam, it still
+  // takes some time for the browser to turn on the webcam and tell us it was
+  // successful.
+  const {awaitWebcamLag} = yield race({
+    requestPermissions: join(requestPermissionsTask),
+    awaitWebcamLag: call(delay, WEBCAM_INIT_LAG),
+  });
+
+  if (awaitWebcamLag) {
+    // delay won the race, meaning we're waiting on user to allow/deny
+    yield put({type: WAITING_ON_USER});
+  }
+}
+```
+
+### Testing
+
+We're on the fence about whether we like saga testing.
+
+On one hand, it's very easy because it's data-in, data-out, meaning you don't have to stub any functions. You just assert the saga's intent to call a function with certain arguments, and then feed the result of that function back into the saga.
+
+```js
+      it("triggers permissionDenied action on user rejection", () => {
+        // stub of Error
+        const error = {
+          name: "NotAllowedError",
+        };
+
+        saga
+          .next()
+          .call([navigator.mediaDevices, navigator.mediaDevices.getUserMedia], { video: true })
+          .throw(error)
+          .put({type: PERMISSION_DENIED})
+          .next()
+          .isDone();
+      });
+```
+
+On the other hand, you're forced to test everything as a single unit, so if your saga calls another saga, the sequence of a test often looks just like the code of the saga under test.
+
+```js
+      function walkSagaUntilRace (s) {
+        return s
+          .next()
+          .fork(requestPermissionFromBrowserSaga)
+          .next(mockTask)
+          .race({
+            requestPermissions: join(mockTask),
+            awaitWebcamLag: call(delay, WEBCAM_INIT_LAG),
+          });
+      }
+```
